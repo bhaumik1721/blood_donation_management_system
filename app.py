@@ -1,170 +1,266 @@
-# app.py
+from flask import Flask, request, jsonify
+from db import get_db_connection
+from flask_bcrypt import Bcrypt
+from flask_cors import CORS
 
-import streamlit as st
-from utils import (
-    register_user, login_user, add_donor_details,
-    get_camps, signup_camp, add_camp, edit_camp,
-    delete_camp, get_camps
-)
+app = Flask(__name__)
+bcrypt = Bcrypt(app)
+CORS(app)  # Allow CORS for frontend
+
+# Example route
+@app.route('/')
+def home():
+    return "Blood Donation Management System API is Running!"
+
+
+# Register Route
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Username and password are required!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Check if username already exists
+    cursor.execute('SELECT * FROM users WHERE username = %s', (username,))
+    existing_user = cursor.fetchone()
+    if existing_user:
+        cursor.close()
+        conn.close()
+        return jsonify({'message': 'Username already exists!'}), 400
+
+    # Hash password
+    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    # Insert into database
+    cursor.execute('INSERT INTO users (username, password) VALUES (%s, %s)', (username, hashed_password))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return jsonify({'message': 'User registered successfully!'}), 201
+
+# -----------------------------
+
+# Login Route
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Username and password are required!'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    # Find user
+    cursor.execute('SELECT * FROM users WHERE username = %s', (username,))
+    user = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if user and bcrypt.check_password_hash(user['password'], password):
+        return jsonify({'message': 'Login successful!', 'role': user['role']}), 200
+    else:
+        return jsonify({'message': 'Invalid username or password!'}), 401
+
 from datetime import datetime
 
-# Streamlit Page Config
-st.set_page_config(page_title="Blood Donation Management System", page_icon="🩸", layout="centered")
+# -----------------------------
+# Add or Update Donor Details Route
+@app.route('/add_donor_details', methods=['POST'])
+@app.route('/add_donor_details', methods=['POST'])
+def add_donor_details():
+    data = request.get_json()
+    username = data.get('username')  # from frontend / postman
+    blood_group = data.get('blood_group')  # donor detail
+    contact = data.get('contact')  # donor detail
+    last_donated = data.get('last_donated')  # donor detail (date)
 
-# Session State to store login info
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.username = ""
-    st.session_state.role = ""
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-# Navbar / Sidebar
-st.sidebar.title("🩸 Blood Donation System")
-page = st.sidebar.selectbox("Navigate", ["Home", "Register", "Login", "View Camps", "Manage Camps", "Logout"])
+    try:
+        # Step 1: Fetch user_id from users table using username
+        cursor.execute('SELECT user_id FROM users WHERE username = %s', (username,))
+        user = cursor.fetchone()
 
+        if user:
+            user_id = user[0]  # user[0] because fetchone() returns tuple (user_id,)
 
-# Functions
-def home_page():
-    st.title("🩸 Welcome to Blood Donation Management System")
-    st.write("Saving Lives, One Donation at a Time!")
-    st.image("https://img.freepik.com/premium-vector/flat-blood-donation-background_23-2149018423.jpg",
-             use_column_width=True)
+            # Step 2: Insert into donor_details table
+            cursor.execute('''
+                INSERT INTO donor_details (user_id, blood_group, contact, last_donated)
+                VALUES (%s, %s, %s, %s)
+            ''', (user_id, blood_group, contact, last_donated))
 
+            conn.commit()
+            return jsonify({'message': 'Donor details added successfully'}), 201
 
-def register_page():
-    st.title("📝 Register")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Register"):
-        if username and password:
-            response = register_user(username, password)
-            st.success(response.json()['message']) if response.status_code == 201 else st.error(
-                response.json()['message'])
         else:
-            st.warning("Please fill all fields.")
+            return jsonify({'message': 'User not found'}), 404
+
+    except Exception as e:
+        print('Error:', e)
+        return jsonify({'error': 'An error occurred while adding donor details.'}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+@app.route('/view_camps', methods=['GET'])
+def view_camps():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)  # dictionary=True to get nice JSON
+
+    cursor.execute('SELECT * FROM camps')
+    camps = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return jsonify({'camps': camps})
 
 
-def login_page():
-    st.title("🔑 Login")
-    username = st.text_input("Username", key="login_username")
-    password = st.text_input("Password", type="password", key="login_password")
+@app.route('/signup_camp', methods=['POST'])
+def signup_camp():
+    data = request.get_json()
+    username = data.get('username')
+    camp_id = data.get('camp_id')
 
-    if st.button("Login"):
-        if username and password:
-            response = login_user(username, password)
-            if response.status_code == 200:
-                st.success(response.json()['message'])
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.session_state.role = response.json()['role']
-                st.experimental_rerun()
-            else:
-                st.error(response.json()['message'])
-        else:
-            st.warning("Please fill all fields.")
+    # Get user_id using username
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
+    cursor.execute('SELECT user_id FROM users WHERE username = %s', (username,))
+    user = cursor.fetchone()
 
-def view_camps_page():
-    st.title("🏥 Available Camps")
-    response = get_camps()
+    if user:
+        user_id = user[0]
 
-    if response.status_code == 200:
-        camps = response.json()['camps']
-        for camp in camps:
-            st.subheader(f"{camp['camp_name']} ({camp['location']})")
-            st.write(f"📅 Date: {camp['date']} | 🕒 Time: {camp['timing']}")
-            if st.session_state.logged_in:
-                if st.button(f"Sign Up for {camp['camp_name']}", key=camp['camp_id']):
-                    signup_response = signup_camp(st.session_state.username, camp['camp_id'])
-                    if signup_response.status_code == 200:
-                        st.success("Signed up successfully!")
-                    else:
-                        st.error(signup_response.json()['error'])
-            st.markdown("---")
+        # Insert the signup information into camp_signups
+        cursor.execute('''
+            INSERT INTO camp_signups (user_id, camp_id, signup_date)
+            VALUES (%s, %s, CURDATE())
+        ''', (user_id, camp_id))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({'message': 'Signed up for camp successfully'})
     else:
-        st.error("Failed to fetch camps!")
+        cursor.close()
+        conn.close()
+        return jsonify({'error': 'User not found'}), 404
 
 
-def manage_camps_page():
-    if not st.session_state.logged_in or st.session_state.role != 'admin':
-        st.warning("You must be an admin to access this page.")
-        return
+@app.route('/add_camp', methods=['POST'])
+def add_camp():
+    if not request.is_json:
+        return jsonify({"error": "Invalid input, JSON expected."}), 400
 
-    st.title("🛠 Manage Camps (Admin)")
+    data = request.get_json()
+    camp_name = data.get('camp_name')
+    location = data.get('location')
+    date = data.get('date')  # Expected format: 'YYYY-MM-DD'
+    timing = data.get('timing')  # Expected format: 'HH:MM:SS'
 
-    tab1, tab2, tab3 = st.tabs(["➕ Add Camp", "✏️ Edit Camp", "🗑️ Delete Camp"])
+    if not all([camp_name, location, date, timing]):
+        return jsonify({"error": "Missing required fields."}), 400
 
-    with tab1:
-        st.subheader("Add a New Camp")
-        camp_name = st.text_input("Camp Name")
-        location = st.text_input("Location")
-        date = st.date_input("Date")
-        timing = st.time_input("Timing")
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-        if st.button("Add Camp"):
-            response = add_camp(camp_name, location, date.strftime('%Y-%m-%d'), timing.strftime('%H:%M:%S'))
-            if response.status_code == 201:
-                st.success("Camp added successfully!")
-            else:
-                st.error(response.json().get('error', 'Error adding camp'))
+    cursor.execute('''
+        INSERT INTO camps (camp_name, location, date, timing)
+        VALUES (%s, %s, %s, %s)
+    ''', (camp_name, location, date, timing))
 
-    with tab2:
-        st.subheader("Edit Existing Camp")
-        camps = get_camps()
-        if camps.status_code == 200:
-            camp_list = camps.json()['camps']
-            camp_options = {f"{c['camp_name']} ({c['location']})": c['camp_id'] for c in camp_list}
-            selected_camp = st.selectbox("Select a Camp to Edit", list(camp_options.keys()))
-            selected_id = camp_options[selected_camp]
+    conn.commit()
+    cursor.close()
+    conn.close()
 
-            new_name = st.text_input("New Camp Name")
-            new_location = st.text_input("New Location")
-            new_date = st.date_input("New Date")
-            new_timing = st.time_input("New Timing")
-
-            if st.button("Update Camp"):
-                response = edit_camp(selected_id, new_name, new_location, new_date.strftime('%Y-%m-%d'),
-                                     new_timing.strftime('%H:%M:%S'))
-                if response.status_code == 200:
-                    st.success("Camp updated successfully!")
-                else:
-                    st.error(response.json().get('error', 'Error updating camp'))
-
-    with tab3:
-        st.subheader("Delete Camp")
-        camps = get_camps()
-        if camps.status_code == 200:
-            camp_list = camps.json()['camps']
-            camp_options = {f"{c['camp_name']} ({c['location']})": c['camp_id'] for c in camp_list}
-            selected_camp = st.selectbox("Select a Camp to Delete", list(camp_options.keys()), key="delete_camp")
-            selected_id = camp_options[selected_camp]
-
-            if st.button("Delete Camp"):
-                response = delete_camp(selected_id)
-                if response.status_code == 200:
-                    st.success("Camp deleted successfully!")
-                else:
-                    st.error(response.json().get('error', 'Error deleting camp'))
+    return jsonify({'message': 'Camp added successfully'}), 201
 
 
-def logout():
-    st.session_state.logged_in = False
-    st.session_state.username = ""
-    st.session_state.role = ""
-    st.success("Logged out successfully!")
+@app.route('/edit_camp', methods=['PUT'])
+def edit_camp():
+    if not request.is_json:
+        return jsonify({"error": "Invalid input, JSON expected."}), 400
+
+    data = request.get_json()
+    camp_id = data.get('camp_id')
+    camp_name = data.get('camp_name')
+    location = data.get('location')
+    date = data.get('date')  # Expected format: 'YYYY-MM-DD'
+    timing = data.get('timing')  # Expected format: 'HH:MM:SS'
+
+    if not all([camp_id, camp_name, location, date, timing]):
+        return jsonify({"error": "Missing required fields."}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        UPDATE camps
+        SET camp_name = %s, location = %s, date = %s, timing = %s
+        WHERE camp_id = %s
+    ''', (camp_name, location, date, timing, camp_id))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return jsonify({'message': 'Camp updated successfully'}), 200
 
 
-# ---------------------------------
-# Main Logic
-if page == "Home":
-    home_page()
-elif page == "Register":
-    register_page()
-elif page == "Login":
-    login_page()
-elif page == "View Camps":
-    view_camps_page()
-elif page == "Manage Camps":
-    manage_camps_page()
-elif page == "Logout":
-    logout()
+@app.route('/delete_camp', methods=['DELETE'])
+def delete_camp():
+    data = request.get_json()
+    camp_id = data.get('camp_id')
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('DELETE FROM camps WHERE camp_id = %s', (camp_id,))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return jsonify({'message': 'Camp deleted successfully'}), 200
+
+
+@app.route('/get_camps', methods=['GET'])
+def get_camps():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        query = "SELECT camp_id, camp_name, location, DATE_FORMAT(date, '%Y-%m-%d') as date, TIME_FORMAT(timing, '%H:%i') as timing FROM camps"
+        cursor.execute(query)
+
+        camps = cursor.fetchall()
+
+        return jsonify({'camps': camps}), 200
+
+    except Exception as e:
+        return jsonify({'message': 'Error fetching camps', 'error': str(e)}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
